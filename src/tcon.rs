@@ -5,7 +5,7 @@ use std::mem::swap;
 #[derive(Copy, Clone)]
 pub struct Parser<'a>(&'a str);
 
-type ParseFunc<P, T> = dyn Fn(&mut P) -> Result<T, ()>;
+type ParseFunc<'a, P, T> = dyn Fn(&mut P) -> Result<T, ()> + 'a;
 
 impl<'a> Parser<'a> {
     pub fn parse_tcon(s: &'a str) -> Cow<'a, str> {
