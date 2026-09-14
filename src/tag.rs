@@ -654,6 +654,7 @@ impl From<v1::Tag> for Tag {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frame::{Content, Picture, PictureType};
     use crate::taglike::TagLike;
     use std::error::Error;
     use std::fs;
@@ -679,6 +680,57 @@ mod tests {
             )));
         }
         Ok(String::from_utf8(output.stderr)?)
+    }
+
+    fn picture(picture_type: PictureType, description: &str) -> Frame {
+        Frame::with_content(
+            "APIC",
+            Content::Picture(Picture {
+                mime_type: "image/jpeg".to_string(),
+                picture_type,
+                description: description.to_string(),
+                data: description.as_bytes().to_vec(),
+            }),
+        )
+    }
+
+    #[test]
+    fn picture_uniqueness_by_descriptor() {
+        let mut tag = Tag::new();
+        tag.add_frame(picture(PictureType::CoverFront, "front"));
+        tag.add_frame(picture(PictureType::CoverFront, "back of the sleeve"));
+        assert_eq!(tag.pictures().count(), 2);
+    }
+
+    #[test]
+    fn picture_icon_uniqueness() {
+        let mut tag = Tag::new();
+        tag.add_frame(picture(PictureType::Icon, "one"));
+        tag.add_frame(picture(PictureType::Icon, "two"));
+        tag.add_frame(picture(PictureType::OtherIcon, "three"));
+        assert_eq!(tag.pictures().count(), 2);
+    }
+
+    #[test]
+    fn picture_icon_vs_descriptor() {
+        let mut tag = Tag::new();
+        tag.add_frame(picture(PictureType::Icon, ""));
+        tag.add_frame(picture(PictureType::CoverFront, "Icon"));
+        assert_eq!(tag.pictures().count(), 2);
+    }
+
+    #[test]
+    fn picture_round_trip() {
+        let mut tag = Tag::new();
+        tag.add_frame(picture(PictureType::CoverFront, "front"));
+        tag.add_frame(picture(PictureType::CoverFront, "back"));
+
+        let mut buffer = Vec::new();
+        tag.write_to(&mut buffer, Version::Id3v24).unwrap();
+        let read = Tag::read_from2(io::Cursor::new(buffer)).unwrap();
+
+        let descriptions: Vec<_> = read.pictures().map(|p| p.description.as_str()).collect();
+        assert_eq!(descriptions, vec!["front", "back"]);
     }
 
     #[test]
