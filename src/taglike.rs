@@ -1058,6 +1058,7 @@ pub trait TagLike: private::Sealed {
     /// ```
     #[deprecated(note = "Use add_frame(frame::Picture{ .. })")]
     fn add_picture(&mut self, picture: Picture) {
+        self.remove_picture_by_type(picture.picture_type);
         self.add_frame(picture);
     }
 

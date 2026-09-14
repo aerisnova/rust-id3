@@ -96,9 +96,15 @@ impl Content {
                         .to_owned(),
                 ),
             ]),
-            Self::Picture(picture) => Comparable(vec![Cow::Owned(
-                picture.picture_type.to_string().as_bytes().to_owned(),
-            )]),
+            // A picture conflicts with one of the same type and content descriptor.
+            // Types $01 and $02 are limited to one each, whatever they describe.
+            Self::Picture(picture) => {
+                let picture_type = Cow::Owned(picture.picture_type.to_string().into_bytes());
+                Comparable(match picture.picture_type {
+                    PictureType::Icon | PictureType::OtherIcon => vec![picture_type],
+                    _ => vec![picture_type, Cow::Borrowed(picture.description.as_bytes())],
+                })
+            }
             Self::EncapsulatedObject(encapsulated_object) => Comparable(vec![Cow::Borrowed(
                 encapsulated_object.description.as_bytes(),
             )]),
