@@ -48,7 +48,9 @@ pub fn decode(mut reader: impl io::Read) -> crate::Result<Option<(usize, Frame)>
 
     let read_size = if flags.contains(Flags::COMPRESSION) {
         let _decompressed_size = reader.read_u32::<BigEndian>()?;
-        content_size.saturating_sub(4)
+        content_size
+            .checked_sub(4)
+            .ok_or_else(|| Error::new(ErrorKind::Parsing, "Insufficient data to decode bytes"))?
     } else {
         content_size
     };

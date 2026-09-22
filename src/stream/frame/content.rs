@@ -10,6 +10,7 @@ use crate::tag::Version;
 use crate::{Error, ErrorKind};
 use std::convert::{TryFrom, TryInto};
 use std::io;
+use std::io::Read;
 use std::iter;
 use std::mem::size_of;
 
@@ -382,13 +383,29 @@ pub fn encode(
     Ok(buf.len())
 }
 
+/// Upper bound on the amount of frame content read into memory.
+///
+/// This guards against decompression-bomb attacks: a frame using the
+/// COMPRESSION flag can declare a small on-disk size while inflating to
+/// gigabytes once passed through `ZlibDecoder`, since `ZlibDecoder` itself
+/// enforces no limit on its output.
+const MAX_FRAME_CONTENT_SIZE: u64 = 256 * 1024 * 1024; // 256 MiB
+
 pub fn decode(
     id: &str,
     version: Version,
-    mut reader: impl io::Read,
+    reader: impl io::Read,
 ) -> crate::Result<(Content, Option<Encoding>)> {
     let mut data = Vec::new();
-    reader.read_to_end(&mut data)?;
+    reader
+        .take(MAX_FRAME_CONTENT_SIZE + 1)
+        .read_to_end(&mut data)?;
+    if data.len() as u64 > MAX_FRAME_CONTENT_SIZE {
+        return Err(Error::new(
+            ErrorKind::Parsing,
+            "frame content exceeds the maximum allowed decoded size",
+        ));
+    }
     let decoder = Decoder {
         r: &mut data,
         version,
@@ -2016,5 +2033,31 @@ mod tests {
             assert!(matches!(e.kind, ErrorKind::InvalidInput));
             assert_eq!(e.description, "MLLT carry subtraction overflow");
         }
+    }
+
+    #[test]
+    fn test_decode_rejects_decompression_bomb() {
+        use flate2::Compression;
+        use flate2::write::ZlibEncoder;
+        use std::io::Write;
+
+        // Highly-compressible payload that inflates far past MAX_FRAME_CONTENT_SIZE.
+        let inflated = vec![0u8; (MAX_FRAME_CONTENT_SIZE + 1024) as usize];
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(&inflated).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let result = decode(
+            "TALB",
+            Version::Id3v24,
+            flate2::read::ZlibDecoder::new(&compressed[..]),
+        );
+
+        let e = result.unwrap_err();
+        assert!(matches!(e.kind, ErrorKind::Parsing));
+        assert_eq!(
+            e.description,
+            "frame content exceeds the maximum allowed decoded size"
+        );
     }
 }
