@@ -1,3 +1,9 @@
+## v1.17.2 (2026-09-22)
+
+### Fix
+
+- Fixes a decompression-bomb vulnerability (#168)
+
 ## v1.17.1 (2026-07-29)
 
 ### Fix
