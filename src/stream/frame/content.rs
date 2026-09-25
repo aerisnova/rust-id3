@@ -170,7 +170,7 @@ impl<W: io::Write> Encoder<W> {
             self.bytes(text_delim)?;
             self.uint32(*timestamp)?;
         }
-        self.byte(0)
+        Ok(())
     }
 
     fn comment_content(&mut self, content: &Comment) -> crate::Result<()> {
@@ -1316,6 +1316,52 @@ mod tests {
                 counter: 0xaaaaaaaaaaaaaaaa,
             })
         );
+    }
+
+    #[test]
+    fn test_sylt() {
+        use crate::frame::{SynchronisedLyrics, SynchronisedLyricsType, TimestampFormat};
+
+        let content = SynchronisedLyrics {
+            lang: "eng".to_string(),
+            timestamp_format: TimestampFormat::Ms,
+            content_type: SynchronisedLyricsType::Lyrics,
+            description: "desc".to_string(),
+            content: vec![(1000, "first".to_string()), (2500, "second".to_string())],
+        };
+        for encoding in &[Encoding::Latin1, Encoding::UTF16] {
+            // ID3v2.3 §4.9 / ID3v2.4 §4.9: the frame ends with the last time stamp;
+            // there is no terminator after it.
+            let mut data = vec![*encoding as u8];
+            data.extend(b"eng");
+            data.push(2); // milliseconds
+            data.push(1); // lyrics
+            data.extend(bytes_for_encoding("desc", *encoding));
+            data.extend(delim_for_encoding(*encoding));
+            for (timestamp, text) in &content.content {
+                data.extend(bytes_for_encoding(text, *encoding));
+                data.extend(delim_for_encoding(*encoding));
+                data.extend(timestamp.to_be_bytes());
+            }
+
+            let mut data_out = Vec::new();
+            encode(
+                &mut data_out,
+                &Content::SynchronisedLyrics(content.clone()),
+                Version::Id3v23,
+                *encoding,
+            )
+            .unwrap();
+            assert_eq!(data, data_out);
+            assert_eq!(
+                *decode("SYLT", Version::Id3v23, &data[..])
+                    .unwrap()
+                    .0
+                    .synchronised_lyrics()
+                    .unwrap(),
+                content
+            );
+        }
     }
 
     #[test]
