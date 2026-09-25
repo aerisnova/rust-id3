@@ -456,6 +456,10 @@ pub fn decode(
             decoder.text_content_multiple()
         }
         id if id.starts_with('T') => decoder.text_content(),
+        // iTunes writes its podcast feed URL as a text frame, with an encoding byte, rather
+        // than as the Latin-1 URL of the other W frames. A URL does not start with a byte
+        // below 0x04, so a spec-style WFED still decodes as a link.
+        "WFED" if matches!(decoder.r.first(), Some(0..=3)) => decoder.text_content(),
         id if id.starts_with('W') => decoder.link_content(),
         "GRP1" => decoder.text_content(),
         "CHAP" => decoder.chapter_content(),
@@ -1316,6 +1320,22 @@ mod tests {
                 counter: 0xaaaaaaaaaaaaaaaa,
             })
         );
+    }
+
+    #[test]
+    fn test_wfed() {
+        // iTunes' WFED: an encoding byte, then the URL as text.
+        for encoding in &[Encoding::Latin1, Encoding::UTF16] {
+            let mut data = vec![*encoding as u8];
+            data.extend(bytes_for_encoding("https://example.com/feed", *encoding));
+            data.extend(delim_for_encoding(*encoding));
+            let (content, _) = decode("WFED", Version::Id3v23, &data[..]).unwrap();
+            assert_eq!(content.text(), Some("https://example.com/feed"));
+        }
+        // A WFED written as the spec's W frames are, a bare Latin-1 URL, is still a link.
+        let (content, _) =
+            decode("WFED", Version::Id3v23, &b"https://example.com/feed"[..]).unwrap();
+        assert_eq!(content.link(), Some("https://example.com/feed"));
     }
 
     #[test]
