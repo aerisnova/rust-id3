@@ -72,6 +72,7 @@ impl Frame {
         // The matching groups must match the decoding groups of stream/frame/content.rs:decode().
         match (id.as_str(), &self.content) {
             ("GRP1", Content::Text(_)) => Ok(()),
+            ("WFED", Content::Text(_)) => Ok(()),
             (id, Content::Text(_)) if id.starts_with('T') && !matches!(id, "TIPL" | "TMCL") => {
                 Ok(())
             }
