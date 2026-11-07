@@ -12,7 +12,7 @@ repository = "https://codeberg.org/polyfloyd/rust-id3"
 description = "A library for reading and writing ID3 metadata"
 keywords = ["id3", "mp3", "wav", "aiff", "metadata"]
 categories = ["encoding", "multimedia", "multimedia::audio", "parser-implementations",]
-include = ["src/*", "Cargo.toml", "LICENSE", "README.md"]
+include = ["/src/*", "/testdata/*", "/Cargo.toml", "/LICENSE", "/README.md"]
 
 [dependencies]
 bitflags = "2.0"
