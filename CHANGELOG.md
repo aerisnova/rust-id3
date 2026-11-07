@@ -1,3 +1,11 @@
+## v1.17.3 (2026-11-07)
+
+### Fix
+
+- Mitigate stack overflow with nested CHAP/CTOC frames
+- Mitigate DoS through decompression-bombs and malicious headers
+- Exclude .direnv in published crates, include testdata
+
 ## v1.17.2 (2026-09-22)
 
 ### Fix
