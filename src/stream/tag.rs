@@ -13,32 +13,52 @@ use std::ops::Range;
 use std::path::Path;
 
 #[derive(Debug)]
-pub struct DecodeSizeBudget {
-    remaining: u64,
+pub struct DecodeBudget {
+    memory_remaining: u64,
+    /// The number of CHAP and CTOC frames that are currently being decoded, nested in each other.
+    depth_remaining: usize,
 }
 
-impl DecodeSizeBudget {
+impl DecodeBudget {
     #[cfg(test)]
     pub fn plenty() -> Self {
-        Self::with_limit(u64::MAX / 2)
+        Self::with_limit(u64::MAX / 2, 1000)
     }
 
-    pub fn with_limit(limit: u64) -> Self {
-        Self { remaining: limit }
+    pub fn with_limit(memory_remaining: u64, depth_remaining: usize) -> Self {
+        Self {
+            memory_remaining,
+            depth_remaining,
+        }
     }
 
-    pub fn remaining(&self) -> u64 {
-        self.remaining
+    pub fn memory_remaining(&self) -> u64 {
+        self.memory_remaining
     }
 
     pub fn consume(&mut self, n: u64) -> crate::Result<()> {
-        self.remaining = self.remaining.checked_sub(n).ok_or_else(|| {
+        self.memory_remaining = self.memory_remaining.checked_sub(n).ok_or_else(|| {
             Error::new(
                 ErrorKind::Parsing,
                 "tag content exceeds the maximum allowed decoded size",
             )
         })?;
         Ok(())
+    }
+
+    pub fn enter_sub_frames(&mut self) -> crate::Result<()> {
+        if self.depth_remaining == 0 {
+            return Err(Error::new(
+                ErrorKind::Parsing,
+                "CHAP/CTOC frames are nested too deeply",
+            ));
+        }
+        self.depth_remaining -= 1;
+        Ok(())
+    }
+
+    pub fn leave_sub_frames(&mut self) {
+        self.depth_remaining += 1;
     }
 }
 
@@ -254,7 +274,7 @@ pub async fn async_decode(
 }
 
 fn decode_remaining(mut reader: impl io::Read, header: Header) -> crate::Result<Tag> {
-    let mut budget = DecodeSizeBudget::with_limit(256 * 1024 * 1024);
+    let mut budget = DecodeBudget::with_limit(256 * 1024 * 1024, 8);
     match header.version {
         Version::Id3v22 => {
             // Limit the reader only to the given tag_size, don't return any more bytes after that.
@@ -314,7 +334,7 @@ fn decode_remaining(mut reader: impl io::Read, header: Header) -> crate::Result<
 
 pub fn decode_v2_frames(
     mut reader: impl io::Read,
-    budget: &mut DecodeSizeBudget,
+    budget: &mut DecodeBudget,
 ) -> crate::Result<Tag> {
     let mut tag = Tag::with_version(Version::Id3v22);
     // Add all frames, until either an error is thrown or there are no more frames to parse
@@ -1146,5 +1166,43 @@ mod tests {
 
         // Without saturating_sub, this would underflow and cause a panic.
         assert_eq!(header.frame_bytes(), 0);
+    }
+
+    // https://codeberg.org/polyfloyd/rust-id3/issues/171
+    #[test]
+    fn test_issue_171() {
+        fn synchsafe(v: usize) -> [u8; 4] {
+            [
+                (v >> 21) as u8 & 0x7f,
+                (v >> 14) as u8 & 0x7f,
+                (v >> 7) as u8 & 0x7f,
+                v as u8 & 0x7f,
+            ]
+        }
+        // Deeply nested CHAP and CTOC frames must be rejected instead of overflowing the stack.
+        for (id, prefix) in [
+            (
+                b"CHAP",
+                &b"c\0\0\0\0\0\0\0\x03\xe8\xff\xff\xff\xff\xff\xff\xff\xff"[..],
+            ),
+            (b"CTOC", &b"t\0\x03\x01c\0"[..]),
+        ] {
+            let mut inner = Vec::new();
+            for _ in 0..20_000 {
+                let mut frame = id.to_vec();
+                frame.extend_from_slice(&synchsafe(prefix.len() + inner.len()));
+                frame.extend_from_slice(&[0, 0]);
+                frame.extend_from_slice(prefix);
+                frame.extend_from_slice(&inner);
+                inner = frame;
+            }
+            let mut tag = b"ID3\x04\0\0".to_vec();
+            tag.extend_from_slice(&synchsafe(inner.len()));
+            tag.extend_from_slice(&inner);
+
+            let e = decode(io::Cursor::new(tag)).unwrap_err();
+            assert!(matches!(e.kind, ErrorKind::Parsing));
+            assert_eq!(e.description, "CHAP/CTOC frames are nested too deeply");
+        }
     }
 }

@@ -1,7 +1,7 @@
 use crate::frame::Frame;
 use crate::stream::encoding::Encoding;
 use crate::stream::frame;
-use crate::stream::tag::DecodeSizeBudget;
+use crate::stream::tag::DecodeBudget;
 use crate::tag::Version;
 use crate::{Error, ErrorKind};
 use bitflags::bitflags;
@@ -23,7 +23,7 @@ bitflags! {
 
 pub fn decode(
     mut reader: impl io::Read,
-    budget: &mut DecodeSizeBudget,
+    budget: &mut DecodeBudget,
 ) -> crate::Result<Option<(usize, Frame)>> {
     let mut frame_header = [0; 10];
     match reader.read_exact(&mut frame_header) {
@@ -58,7 +58,7 @@ pub fn decode(
     } else {
         content_size
     };
-    if read_size as u64 > budget.remaining() {
+    if read_size as u64 > budget.memory_remaining() {
         return Err(Error::new(
             ErrorKind::Parsing,
             "frame size exceeds the maximum allowed tag content size",
@@ -165,7 +165,7 @@ mod tests {
         let mut reader = Cursor::new(data);
 
         // Attempt to decode the frame
-        let result = decode(&mut reader, &mut DecodeSizeBudget::plenty());
+        let result = decode(&mut reader, &mut DecodeBudget::plenty());
 
         // Ensure that the result is an error due to underflow
         assert!(result.is_err());
@@ -186,7 +186,7 @@ mod tests {
 
         let e = decode(
             Cursor::new(data),
-            &mut DecodeSizeBudget::with_limit(256 * 1024 * 1024),
+            &mut DecodeBudget::with_limit(256 * 1024 * 1024, 8),
         )
         .unwrap_err();
         assert!(matches!(e.kind, ErrorKind::Parsing));
@@ -205,7 +205,7 @@ mod tests {
         data.extend_from_slice(&[0x00, 0x00]);
         data.extend_from_slice(b"\x00abc");
 
-        let e = decode(Cursor::new(data), &mut DecodeSizeBudget::plenty()).unwrap_err();
+        let e = decode(Cursor::new(data), &mut DecodeBudget::plenty()).unwrap_err();
         assert!(
             matches!(e.kind, ErrorKind::Io(ref err) if err.kind() == io::ErrorKind::UnexpectedEof)
         );

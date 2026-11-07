@@ -1,7 +1,7 @@
 use crate::frame::Frame;
 use crate::stream::encoding::Encoding;
 use crate::stream::frame;
-use crate::stream::tag::DecodeSizeBudget;
+use crate::stream::tag::DecodeBudget;
 use crate::tag::Version;
 use crate::{Error, ErrorKind};
 use byteorder::{BigEndian, WriteBytesExt};
@@ -9,7 +9,7 @@ use std::io;
 
 pub fn decode(
     mut reader: impl io::Read,
-    budget: &mut DecodeSizeBudget,
+    budget: &mut DecodeBudget,
 ) -> crate::Result<Option<(usize, Frame)>> {
     let mut frame_header = [0; 6];
     match reader.read_exact(&mut frame_header) {

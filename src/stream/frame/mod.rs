@@ -1,7 +1,7 @@
 use crate::frame::Content;
 use crate::frame::Frame;
 use crate::stream::encoding::Encoding;
-use crate::stream::tag::DecodeSizeBudget;
+use crate::stream::tag::DecodeBudget;
 use crate::stream::unsynch;
 use crate::tag::Version;
 use flate2::read::ZlibDecoder;
@@ -16,7 +16,7 @@ pub mod v4;
 pub fn decode(
     reader: impl io::Read,
     version: Version,
-    budget: &mut DecodeSizeBudget,
+    budget: &mut DecodeBudget,
 ) -> crate::Result<Option<(usize, Frame)>> {
     match version {
         Version::Id3v22 => unimplemented!(),
@@ -31,7 +31,7 @@ fn decode_content(
     id: &str,
     compression: bool,
     unsynchronisation: bool,
-    budget: &mut DecodeSizeBudget,
+    budget: &mut DecodeBudget,
 ) -> crate::Result<(Content, Option<Encoding>)> {
     if unsynchronisation {
         let reader_unsynch = unsynch::Reader::new(reader);
@@ -127,7 +127,7 @@ mod tests {
             id,
             false,
             false,
-            &mut DecodeSizeBudget::plenty(),
+            &mut DecodeBudget::plenty(),
         )
         .unwrap()
         .0;
@@ -159,7 +159,7 @@ mod tests {
             id,
             false,
             false,
-            &mut DecodeSizeBudget::plenty(),
+            &mut DecodeBudget::plenty(),
         )
         .unwrap()
         .0;
@@ -192,7 +192,7 @@ mod tests {
             id,
             false,
             false,
-            &mut DecodeSizeBudget::plenty(),
+            &mut DecodeBudget::plenty(),
         )
         .unwrap()
         .0;

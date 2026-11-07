@@ -1,12 +1,13 @@
 use crate::frame::{
-    Chapter, Comment, Content, EncapsulatedObject, ExtendedLink, ExtendedText, InvolvedPeopleList,
-    InvolvedPeopleListItem, Lyrics, MpegLocationLookupTable, MpegLocationLookupTableReference,
-    Picture, PictureType, Popularimeter, Private, SynchronisedLyrics, SynchronisedLyricsType,
-    TableOfContents, TimestampFormat, UniqueFileIdentifier, Unknown,
+    Chapter, Comment, Content, EncapsulatedObject, ExtendedLink, ExtendedText, Frame,
+    InvolvedPeopleList, InvolvedPeopleListItem, Lyrics, MpegLocationLookupTable,
+    MpegLocationLookupTableReference, Picture, PictureType, Popularimeter, Private,
+    SynchronisedLyrics, SynchronisedLyricsType, TableOfContents, TimestampFormat,
+    UniqueFileIdentifier, Unknown,
 };
 use crate::stream::encoding::Encoding;
 use crate::stream::frame;
-use crate::stream::tag::DecodeSizeBudget;
+use crate::stream::tag::DecodeBudget;
 use crate::tag::Version;
 use crate::{Error, ErrorKind};
 use std::convert::{TryFrom, TryInto};
@@ -388,10 +389,12 @@ pub fn decode(
     id: &str,
     version: Version,
     reader: impl io::Read,
-    budget: &mut DecodeSizeBudget,
+    budget: &mut DecodeBudget,
 ) -> crate::Result<(Content, Option<Encoding>)> {
     let mut data = Vec::new();
-    reader.take(budget.remaining() + 1).read_to_end(&mut data)?;
+    reader
+        .take(budget.memory_remaining() + 1)
+        .read_to_end(&mut data)?;
     budget.consume(data.len() as u64)?;
     let decoder = Decoder {
         r: &mut data,
@@ -459,7 +462,7 @@ pub fn decode(
 struct Decoder<'a> {
     r: &'a [u8],
     version: Version,
-    budget: &'a mut DecodeSizeBudget,
+    budget: &'a mut DecodeBudget,
 }
 
 impl<'a> Decoder<'a> {
@@ -834,16 +837,28 @@ impl<'a> Decoder<'a> {
         }))
     }
 
+    /// Decodes the sub-frames that are embedded in CHAP and CTOC frames.
+    fn sub_frames(&mut self) -> crate::Result<Vec<Frame>> {
+        self.budget.enter_sub_frames()?;
+        let mut frames = Vec::new();
+        let rs = loop {
+            match frame::decode(&mut self.r, self.version, self.budget) {
+                Ok(Some((_advance, frame))) => frames.push(frame),
+                Ok(None) => break Ok(frames),
+                Err(err) => break Err(err),
+            }
+        };
+        self.budget.leave_sub_frames();
+        rs
+    }
+
     fn chapter_content(mut self) -> crate::Result<Content> {
         let element_id = self.string_delimited(Encoding::Latin1)?;
         let start_time = self.uint32()?;
         let end_time = self.uint32()?;
         let start_offset = self.uint32()?;
         let end_offset = self.uint32()?;
-        let mut frames = Vec::new();
-        while let Some((_advance, frame)) = frame::decode(&mut self.r, self.version, self.budget)? {
-            frames.push(frame);
-        }
+        let frames = self.sub_frames()?;
         Ok(Content::Chapter(Chapter {
             element_id,
             start_time,
@@ -962,10 +977,7 @@ impl<'a> Decoder<'a> {
         for _ in 0..element_count {
             elements.push(self.string_delimited(Encoding::Latin1)?);
         }
-        let mut frames = Vec::new();
-        while let Some((_advance, frame)) = frame::decode(&mut self.r, self.version, self.budget)? {
-            frames.push(frame);
-        }
+        let frames = self.sub_frames()?;
         Ok(Content::TableOfContents(TableOfContents {
             element_id,
             top_level,
@@ -1080,15 +1092,7 @@ mod tests {
             return;
         }
 
-        assert!(
-            decode(
-                "PIC",
-                Version::Id3v22,
-                &[][..],
-                &mut DecodeSizeBudget::plenty()
-            )
-            .is_err()
-        );
+        assert!(decode("PIC", Version::Id3v22, &[][..], &mut DecodeBudget::plenty()).is_err());
 
         let mut format_map = HashMap::new();
         format_map.insert("image/jpeg", "JPG");
@@ -1120,7 +1124,7 @@ mod tests {
                             "PIC",
                             Version::Id3v22,
                             &data[..],
-                            &mut DecodeSizeBudget::plenty()
+                            &mut DecodeBudget::plenty()
                         )
                         .unwrap()
                         .0
@@ -1153,7 +1157,7 @@ mod tests {
                 "APIC",
                 Version::Id3v23,
                 &[][..],
-                &mut DecodeSizeBudget::plenty()
+                &mut DecodeBudget::plenty()
             )
             .is_err()
         );
@@ -1190,7 +1194,7 @@ mod tests {
                             "APIC",
                             Version::Id3v23,
                             &data[..],
-                            &mut DecodeSizeBudget::plenty()
+                            &mut DecodeBudget::plenty()
                         )
                         .unwrap()
                         .0
@@ -1219,7 +1223,7 @@ mod tests {
                 "COMM",
                 Version::Id3v23,
                 &[][..],
-                &mut DecodeSizeBudget::plenty()
+                &mut DecodeBudget::plenty()
             )
             .is_err()
         );
@@ -1251,7 +1255,7 @@ mod tests {
                             "COMM",
                             Version::Id3v23,
                             &data[..],
-                            &mut DecodeSizeBudget::plenty()
+                            &mut DecodeBudget::plenty()
                         )
                         .unwrap()
                         .0
@@ -1292,7 +1296,7 @@ mod tests {
                     "COMM",
                     Version::Id3v23,
                     &data[..],
-                    &mut DecodeSizeBudget::plenty()
+                    &mut DecodeBudget::plenty()
                 )
                 .is_err()
             );
@@ -1323,7 +1327,7 @@ mod tests {
                     "COMM",
                     Version::Id3v23,
                     &data[..],
-                    &mut DecodeSizeBudget::plenty()
+                    &mut DecodeBudget::plenty()
                 )
                 .unwrap()
                 .0
@@ -1343,7 +1347,7 @@ mod tests {
                 "POPM",
                 Version::Id3v23,
                 &bin[..],
-                &mut DecodeSizeBudget::plenty()
+                &mut DecodeBudget::plenty()
             )
             .unwrap()
             .0,
@@ -1361,7 +1365,7 @@ mod tests {
                 "POPM",
                 Version::Id3v23,
                 &bin[..],
-                &mut DecodeSizeBudget::plenty()
+                &mut DecodeBudget::plenty()
             )
             .unwrap()
             .0,
@@ -1380,7 +1384,7 @@ mod tests {
                 "TALB",
                 Version::Id3v23,
                 &[][..],
-                &mut DecodeSizeBudget::plenty()
+                &mut DecodeBudget::plenty()
             )
             .is_err()
         );
@@ -1402,7 +1406,7 @@ mod tests {
                         "TALB",
                         Version::Id3v23,
                         &data[..],
-                        &mut DecodeSizeBudget::plenty()
+                        &mut DecodeBudget::plenty()
                     )
                     .unwrap()
                     .0
@@ -1430,7 +1434,7 @@ mod tests {
                 "TRCK",
                 Version::Id3v24,
                 &[][..],
-                &mut DecodeSizeBudget::plenty()
+                &mut DecodeBudget::plenty()
             )
             .is_err()
         );
@@ -1451,7 +1455,7 @@ mod tests {
                     "TALB",
                     Version::Id3v24,
                     &data[..],
-                    &mut DecodeSizeBudget::plenty()
+                    &mut DecodeBudget::plenty()
                 )
                 .unwrap()
                 .0
@@ -1478,7 +1482,7 @@ mod tests {
                 "TRCK",
                 Version::Id3v24,
                 &[][..],
-                &mut DecodeSizeBudget::plenty()
+                &mut DecodeBudget::plenty()
             )
             .is_err()
         );
@@ -1499,7 +1503,7 @@ mod tests {
                     "TALB",
                     Version::Id3v24,
                     &data[..],
-                    &mut DecodeSizeBudget::plenty()
+                    &mut DecodeBudget::plenty()
                 )
                 .unwrap()
                 .0
@@ -1526,7 +1530,7 @@ mod tests {
                 "TXXX",
                 Version::Id3v23,
                 &[][..],
-                &mut DecodeSizeBudget::plenty()
+                &mut DecodeBudget::plenty()
             )
             .is_err()
         );
@@ -1556,7 +1560,7 @@ mod tests {
                             "TXXX",
                             Version::Id3v23,
                             &data[..],
-                            &mut DecodeSizeBudget::plenty()
+                            &mut DecodeBudget::plenty()
                         )
                         .unwrap()
                         .0
@@ -1596,7 +1600,7 @@ mod tests {
                     "TXXX",
                     Version::Id3v23,
                     &data[..],
-                    &mut DecodeSizeBudget::plenty()
+                    &mut DecodeBudget::plenty()
                 )
                 .is_err()
             );
@@ -1614,7 +1618,7 @@ mod tests {
                     "WOAF",
                     Version::Id3v23,
                     &data[..],
-                    &mut DecodeSizeBudget::plenty()
+                    &mut DecodeBudget::plenty()
                 )
                 .unwrap()
                 .0
@@ -1641,7 +1645,7 @@ mod tests {
                 "WXXX",
                 Version::Id3v23,
                 &[][..],
-                &mut DecodeSizeBudget::plenty()
+                &mut DecodeBudget::plenty()
             )
             .is_err()
         );
@@ -1671,7 +1675,7 @@ mod tests {
                             "WXXX",
                             Version::Id3v23,
                             &data[..],
-                            &mut DecodeSizeBudget::plenty()
+                            &mut DecodeBudget::plenty()
                         )
                         .unwrap()
                         .0
@@ -1711,7 +1715,7 @@ mod tests {
                     "WXXX",
                     Version::Id3v23,
                     &data[..],
-                    &mut DecodeSizeBudget::plenty()
+                    &mut DecodeBudget::plenty()
                 )
                 .is_err()
             );
@@ -1725,7 +1729,7 @@ mod tests {
                 "USLT",
                 Version::Id3v23,
                 &[][..],
-                &mut DecodeSizeBudget::plenty()
+                &mut DecodeBudget::plenty()
             )
             .is_err()
         );
@@ -1757,7 +1761,7 @@ mod tests {
                             "USLT",
                             Version::Id3v23,
                             &data[..],
-                            &mut DecodeSizeBudget::plenty()
+                            &mut DecodeBudget::plenty()
                         )
                         .unwrap()
                         .0
@@ -1798,7 +1802,7 @@ mod tests {
                     "USLT",
                     Version::Id3v23,
                     &data[..],
-                    &mut DecodeSizeBudget::plenty()
+                    &mut DecodeBudget::plenty()
                 )
                 .is_err()
             );
@@ -1821,7 +1825,7 @@ mod tests {
     }
 
     fn check_involved_people_list(frame_id: &str, version: Version) {
-        assert!(decode(frame_id, version, &[][..], &mut DecodeSizeBudget::plenty()).is_err());
+        assert!(decode(frame_id, version, &[][..], &mut DecodeBudget::plenty()).is_err());
 
         println!("valid");
         for people_list in &[
@@ -1860,16 +1864,11 @@ mod tests {
                         .collect(),
                 };
                 assert_eq!(
-                    *decode(
-                        frame_id,
-                        version,
-                        &data[..],
-                        &mut DecodeSizeBudget::plenty()
-                    )
-                    .unwrap()
-                    .0
-                    .involved_people_list()
-                    .unwrap(),
+                    *decode(frame_id, version, &data[..], &mut DecodeBudget::plenty())
+                        .unwrap()
+                        .0
+                        .involved_people_list()
+                        .unwrap(),
                     content
                 );
                 let mut data_out = Vec::new();
@@ -1916,16 +1915,11 @@ mod tests {
                 ],
             };
             assert_eq!(
-                *decode(
-                    frame_id,
-                    version,
-                    &data[..],
-                    &mut DecodeSizeBudget::plenty()
-                )
-                .unwrap()
-                .0
-                .involved_people_list()
-                .unwrap(),
+                *decode(frame_id, version, &data[..], &mut DecodeBudget::plenty())
+                    .unwrap()
+                    .0
+                    .involved_people_list()
+                    .unwrap(),
                 content
             );
         }
@@ -1962,7 +1956,7 @@ mod tests {
             "MLLT",
             Version::Id3v23,
             &*data_out,
-            &mut DecodeSizeBudget::plenty(),
+            &mut DecodeBudget::plenty(),
         )
         .unwrap()
         .0;
@@ -2000,7 +1994,7 @@ mod tests {
             "MLLT",
             Version::Id3v23,
             &*data_out,
-            &mut DecodeSizeBudget::plenty(),
+            &mut DecodeBudget::plenty(),
         )
         .unwrap()
         .0;
@@ -2039,7 +2033,7 @@ mod tests {
             "MLLT",
             Version::Id3v23,
             &*data_out,
-            &mut DecodeSizeBudget::plenty(),
+            &mut DecodeBudget::plenty(),
         )
         .unwrap()
         .0;
@@ -2153,7 +2147,7 @@ mod tests {
             "MLLT",
             Version::Id3v23,
             &mut reader,
-            &mut DecodeSizeBudget::plenty(),
+            &mut DecodeBudget::plenty(),
         );
 
         // Ensure that the result is an error due to overflow
@@ -2188,7 +2182,7 @@ mod tests {
             "MLLT",
             Version::Id3v23,
             &mut reader,
-            &mut DecodeSizeBudget::plenty(),
+            &mut DecodeBudget::plenty(),
         );
 
         // Ensure that the result is an error due to overflow
@@ -2232,7 +2226,7 @@ mod tests {
             "MLLT",
             Version::Id3v23,
             &mut reader,
-            &mut DecodeSizeBudget::plenty(),
+            &mut DecodeBudget::plenty(),
         );
 
         // Ensure that the result is an error due to overflow
@@ -2260,7 +2254,7 @@ mod tests {
             "TALB",
             Version::Id3v24,
             flate2::read::ZlibDecoder::new(&compressed[..]),
-            &mut DecodeSizeBudget::with_limit(limit),
+            &mut DecodeBudget::with_limit(limit, 8),
         );
 
         let e = result.unwrap_err();
@@ -2273,14 +2267,14 @@ mod tests {
 
     #[test]
     fn test_decode_budget_is_shared_between_frames() {
-        let mut budget = DecodeSizeBudget::with_limit(10);
+        let mut budget = DecodeBudget::with_limit(10, 8);
         let mut data = vec![Encoding::Latin1 as u8];
         data.extend(b"abcd");
 
         // 5 bytes each: the first two frames fit exactly, the third exceeds the budget.
         assert!(decode("TALB", Version::Id3v24, &data[..], &mut budget).is_ok());
         assert!(decode("TIT2", Version::Id3v24, &data[..], &mut budget).is_ok());
-        assert_eq!(budget.remaining(), 0);
+        assert_eq!(budget.memory_remaining(), 0);
         let e = decode("TPE1", Version::Id3v24, &data[..], &mut budget).unwrap_err();
         assert!(matches!(e.kind, ErrorKind::Parsing));
         assert_eq!(
@@ -2303,14 +2297,63 @@ mod tests {
         chap.extend(&sub_frame);
 
         // The CHAP content itself fits the budget, but the copy made of its sub-frame does not.
-        let mut budget = DecodeSizeBudget::with_limit(chap.len() as u64 + 1);
+        let mut budget = DecodeBudget::with_limit(chap.len() as u64 + 1, 8);
         let e = decode("CHAP", Version::Id3v24, &chap[..], &mut budget).unwrap_err();
         assert_eq!(
             e.description,
             "tag content exceeds the maximum allowed decoded size"
         );
 
-        let mut budget = DecodeSizeBudget::with_limit(2 * chap.len() as u64);
+        let mut budget = DecodeBudget::with_limit(2 * chap.len() as u64, 8);
         assert!(decode("CHAP", Version::Id3v24, &chap[..], &mut budget).is_ok());
+    }
+
+    #[test]
+    fn test_decode_limits_sub_frame_depth() {
+        fn nested_chapters(depth: usize) -> Frame {
+            let mut frame = Frame::text("TIT2", "abcd");
+            for _ in 0..depth {
+                frame = Frame::with_content(
+                    "CHAP",
+                    Content::Chapter(Chapter {
+                        element_id: "c".to_string(),
+                        start_time: 0,
+                        end_time: 0,
+                        start_offset: 0,
+                        end_offset: 0,
+                        frames: vec![frame],
+                    }),
+                );
+            }
+            frame
+        }
+        fn encode(frame: &Frame) -> Vec<u8> {
+            let mut data = Vec::new();
+            crate::stream::frame::v4::encode(
+                &mut data,
+                frame,
+                crate::stream::frame::v4::Flags::empty(),
+            )
+            .unwrap();
+            data
+        }
+
+        // Decoding twice with the same budget checks that the depth is restored after each frame.
+        let mut budget = DecodeBudget::with_limit(u64::MAX / 2, 8);
+        let frame = nested_chapters(8);
+        for _ in 0..2 {
+            let (_, decoded) = crate::stream::frame::v4::decode(&encode(&frame)[..], &mut budget)
+                .unwrap()
+                .unwrap();
+            assert_eq!(decoded, frame);
+        }
+
+        let e = crate::stream::frame::v4::decode(
+            &encode(&nested_chapters(9))[..],
+            &mut DecodeBudget::with_limit(u64::MAX / 2, 8),
+        )
+        .unwrap_err();
+        assert!(matches!(e.kind, ErrorKind::Parsing));
+        assert_eq!(e.description, "CHAP/CTOC frames are nested too deeply");
     }
 }
