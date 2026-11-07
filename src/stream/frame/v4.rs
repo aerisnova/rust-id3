@@ -1,5 +1,6 @@
 use crate::frame::Frame;
 use crate::stream::encoding::Encoding;
+use crate::stream::tag::DecodeSizeBudget;
 use crate::stream::{frame, unsynch};
 use crate::tag::Version;
 use crate::{Error, ErrorKind};
@@ -22,7 +23,10 @@ bitflags! {
     }
 }
 
-pub fn decode(mut reader: impl io::Read) -> crate::Result<Option<(usize, Frame)>> {
+pub fn decode(
+    mut reader: impl io::Read,
+    budget: &mut DecodeSizeBudget,
+) -> crate::Result<Option<(usize, Frame)>> {
     let mut frame_header = [0; 10];
     match reader.read_exact(&mut frame_header) {
         Ok(()) => {}
@@ -60,6 +64,7 @@ pub fn decode(mut reader: impl io::Read) -> crate::Result<Option<(usize, Frame)>
         id,
         flags.contains(Flags::COMPRESSION),
         flags.contains(Flags::UNSYNCHRONISATION),
+        budget,
     )?;
     let frame = Frame::with_content(id, content).set_encoding(encoding);
     Ok(Some((10 + content_size, frame)))
@@ -156,7 +161,7 @@ mod tests {
         let mut reader = Cursor::new(data);
 
         // Attempt to decode the frame
-        let result = decode(&mut reader);
+        let result = decode(&mut reader, &mut DecodeSizeBudget::plenty());
 
         // Ensure that the result is an error due to underflow
         assert!(result.is_err());

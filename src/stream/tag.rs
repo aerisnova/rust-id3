@@ -12,6 +12,36 @@ use std::io::{self, Read, Seek, Write};
 use std::ops::Range;
 use std::path::Path;
 
+#[derive(Debug)]
+pub struct DecodeSizeBudget {
+    remaining: u64,
+}
+
+impl DecodeSizeBudget {
+    #[cfg(test)]
+    pub fn plenty() -> Self {
+        Self::with_limit(u64::MAX / 2)
+    }
+
+    pub fn with_limit(limit: u64) -> Self {
+        Self { remaining: limit }
+    }
+
+    pub fn remaining(&self) -> u64 {
+        self.remaining
+    }
+
+    pub fn consume(&mut self, n: u64) -> crate::Result<()> {
+        self.remaining = self.remaining.checked_sub(n).ok_or_else(|| {
+            Error::new(
+                ErrorKind::Parsing,
+                "tag content exceeds the maximum allowed decoded size",
+            )
+        })?;
+        Ok(())
+    }
+}
+
 static DEFAULT_FILE_DISCARD: &[&str] = &[
     "AENC", "ETCO", "EQUA", "MLLT", "POSS", "SYLT", "SYTC", "RVAD", "TENC", "TLEN", "TSIZ",
 ];
@@ -224,6 +254,7 @@ pub async fn async_decode(
 }
 
 fn decode_remaining(mut reader: impl io::Read, header: Header) -> crate::Result<Tag> {
+    let mut budget = DecodeSizeBudget::with_limit(256 * 1024 * 1024);
     match header.version {
         Version::Id3v22 => {
             // Limit the reader only to the given tag_size, don't return any more bytes after that.
@@ -231,9 +262,9 @@ fn decode_remaining(mut reader: impl io::Read, header: Header) -> crate::Result<
 
             if header.flags.contains(Flags::UNSYNCHRONISATION) {
                 // Unwrap all 'unsynchronized' bytes in the tag before parsing frames.
-                decode_v2_frames(unsynch::Reader::new(v2_reader))
+                decode_v2_frames(unsynch::Reader::new(v2_reader), &mut budget)
             } else {
-                decode_v2_frames(v2_reader)
+                decode_v2_frames(v2_reader, &mut budget)
             }
         }
         Version::Id3v23 => {
@@ -247,7 +278,7 @@ fn decode_remaining(mut reader: impl io::Read, header: Header) -> crate::Result<
             let mut offset = 0;
             let mut tag = Tag::with_version(header.version);
             while offset < header.frame_bytes() {
-                let v = match frame::v3::decode(&mut reader) {
+                let v = match frame::v3::decode(&mut reader, &mut budget) {
                     Ok(v) => v,
                     Err(err) => return Err(err.with_tag(tag)),
                 };
@@ -265,7 +296,7 @@ fn decode_remaining(mut reader: impl io::Read, header: Header) -> crate::Result<
             let mut tag = Tag::with_version(header.version);
 
             while offset < header.frame_bytes() {
-                let v = match frame::v4::decode(&mut reader) {
+                let v = match frame::v4::decode(&mut reader, &mut budget) {
                     Ok(v) => v,
                     Err(err) => return Err(err.with_tag(tag)),
                 };
@@ -281,12 +312,15 @@ fn decode_remaining(mut reader: impl io::Read, header: Header) -> crate::Result<
     }
 }
 
-pub fn decode_v2_frames(mut reader: impl io::Read) -> crate::Result<Tag> {
+pub fn decode_v2_frames(
+    mut reader: impl io::Read,
+    budget: &mut DecodeSizeBudget,
+) -> crate::Result<Tag> {
     let mut tag = Tag::with_version(Version::Id3v22);
     // Add all frames, until either an error is thrown or there are no more frames to parse
     // (because of EOF or a Padding).
     loop {
-        let v = match frame::v2::decode(&mut reader) {
+        let v = match frame::v2::decode(&mut reader, budget) {
             Ok(v) => v,
             Err(err) => return Err(err.with_tag(tag)),
         };

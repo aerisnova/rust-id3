@@ -1,13 +1,14 @@
 use crate::frame::Frame;
 use crate::stream::encoding::Encoding;
 use crate::stream::frame;
+use crate::stream::tag::DecodeSizeBudget;
 use crate::tag::Version;
 use crate::{Error, ErrorKind};
 use bitflags::bitflags;
 use byteorder::{BigEndian, ByteOrder, ReadBytesExt, WriteBytesExt};
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
-use std::io;
+use std::io::{self, Read};
 
 bitflags! {
     pub struct Flags: u16 {
@@ -20,7 +21,10 @@ bitflags! {
     }
 }
 
-pub fn decode(mut reader: impl io::Read) -> crate::Result<Option<(usize, Frame)>> {
+pub fn decode(
+    mut reader: impl io::Read,
+    budget: &mut DecodeSizeBudget,
+) -> crate::Result<Option<(usize, Frame)>> {
     let mut frame_header = [0; 10];
     match reader.read_exact(&mut frame_header) {
         Ok(()) => {}
@@ -54,14 +58,28 @@ pub fn decode(mut reader: impl io::Read) -> crate::Result<Option<(usize, Frame)>
     } else {
         content_size
     };
-    let mut content_buf = vec![0; read_size];
-    reader.read_exact(&mut content_buf)?;
+    if read_size as u64 > budget.remaining() {
+        return Err(Error::new(
+            ErrorKind::Parsing,
+            "frame size exceeds the maximum allowed tag content size",
+        ));
+    }
+
+    let mut content_buf = Vec::new();
+    reader
+        .by_ref()
+        .take(read_size as u64)
+        .read_to_end(&mut content_buf)?;
+    if content_buf.len() != read_size {
+        return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+    }
     let (content, encoding) = super::decode_content(
         &content_buf[..],
         Version::Id3v23,
         id,
         flags.contains(Flags::COMPRESSION),
         false,
+        budget,
     )?;
     let frame = Frame::with_content(id, content).set_encoding(encoding);
     Ok(Some((10 + content_size, frame)))
@@ -147,7 +165,7 @@ mod tests {
         let mut reader = Cursor::new(data);
 
         // Attempt to decode the frame
-        let result = decode(&mut reader);
+        let result = decode(&mut reader, &mut DecodeSizeBudget::plenty());
 
         // Ensure that the result is an error due to underflow
         assert!(result.is_err());
@@ -155,5 +173,41 @@ mod tests {
             assert!(matches!(e.kind, ErrorKind::Parsing));
             assert_eq!(e.description, "Insufficient data to decode bytes");
         }
+    }
+
+    #[test]
+    fn test_decode_rejects_oversized_frame_without_allocating() {
+        // A frame declaring a ~4 GiB size, followed by only a few bytes of data.
+        let mut data = Vec::new();
+        data.extend_from_slice(b"TIT2");
+        data.extend_from_slice(&[0xff, 0xff, 0xff, 0xf0]);
+        data.extend_from_slice(&[0x00, 0x00]);
+        data.extend_from_slice(b"\x00abc");
+
+        let e = decode(
+            Cursor::new(data),
+            &mut DecodeSizeBudget::with_limit(256 * 1024 * 1024),
+        )
+        .unwrap_err();
+        assert!(matches!(e.kind, ErrorKind::Parsing));
+        assert_eq!(
+            e.description,
+            "frame size exceeds the maximum allowed tag content size"
+        );
+    }
+
+    #[test]
+    fn test_decode_truncated_frame() {
+        // A frame declaring 100 bytes of content of which only 4 are present.
+        let mut data = Vec::new();
+        data.extend_from_slice(b"TIT2");
+        data.extend_from_slice(&100u32.to_be_bytes());
+        data.extend_from_slice(&[0x00, 0x00]);
+        data.extend_from_slice(b"\x00abc");
+
+        let e = decode(Cursor::new(data), &mut DecodeSizeBudget::plenty()).unwrap_err();
+        assert!(
+            matches!(e.kind, ErrorKind::Io(ref err) if err.kind() == io::ErrorKind::UnexpectedEof)
+        );
     }
 }

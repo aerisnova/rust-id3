@@ -1,12 +1,16 @@
 use crate::frame::Frame;
 use crate::stream::encoding::Encoding;
 use crate::stream::frame;
+use crate::stream::tag::DecodeSizeBudget;
 use crate::tag::Version;
 use crate::{Error, ErrorKind};
 use byteorder::{BigEndian, WriteBytesExt};
 use std::io;
 
-pub fn decode(mut reader: impl io::Read) -> crate::Result<Option<(usize, Frame)>> {
+pub fn decode(
+    mut reader: impl io::Read,
+    budget: &mut DecodeSizeBudget,
+) -> crate::Result<Option<(usize, Frame)>> {
     let mut frame_header = [0; 6];
     match reader.read_exact(&mut frame_header) {
         Ok(()) => {}
@@ -20,8 +24,12 @@ pub fn decode(mut reader: impl io::Read) -> crate::Result<Option<(usize, Frame)>
     let sizebytes = &frame_header[3..6];
     let read_size =
         (u32::from(sizebytes[0]) << 16) | (u32::from(sizebytes[1]) << 8) | u32::from(sizebytes[2]);
-    let (content, encoding) =
-        super::content::decode(id, Version::Id3v22, reader.take(u64::from(read_size)))?;
+    let (content, encoding) = super::content::decode(
+        id,
+        Version::Id3v22,
+        reader.take(u64::from(read_size)),
+        budget,
+    )?;
     let frame = Frame::with_content(id, content).set_encoding(encoding);
     Ok(Some((6 + read_size as usize, frame)))
 }

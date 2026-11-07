@@ -1,6 +1,7 @@
 use crate::frame::Content;
 use crate::frame::Frame;
 use crate::stream::encoding::Encoding;
+use crate::stream::tag::DecodeSizeBudget;
 use crate::stream::unsynch;
 use crate::tag::Version;
 use flate2::read::ZlibDecoder;
@@ -12,11 +13,15 @@ pub mod v2;
 pub mod v3;
 pub mod v4;
 
-pub fn decode(reader: impl io::Read, version: Version) -> crate::Result<Option<(usize, Frame)>> {
+pub fn decode(
+    reader: impl io::Read,
+    version: Version,
+    budget: &mut DecodeSizeBudget,
+) -> crate::Result<Option<(usize, Frame)>> {
     match version {
         Version::Id3v22 => unimplemented!(),
-        Version::Id3v23 => v3::decode(reader),
-        Version::Id3v24 => v4::decode(reader),
+        Version::Id3v23 => v3::decode(reader, budget),
+        Version::Id3v24 => v4::decode(reader, budget),
     }
 }
 
@@ -26,18 +31,19 @@ fn decode_content(
     id: &str,
     compression: bool,
     unsynchronisation: bool,
+    budget: &mut DecodeSizeBudget,
 ) -> crate::Result<(Content, Option<Encoding>)> {
     if unsynchronisation {
         let reader_unsynch = unsynch::Reader::new(reader);
         if compression {
-            content::decode(id, version, ZlibDecoder::new(reader_unsynch))
+            content::decode(id, version, ZlibDecoder::new(reader_unsynch), budget)
         } else {
-            content::decode(id, version, reader_unsynch)
+            content::decode(id, version, reader_unsynch, budget)
         }
     } else if compression {
-        content::decode(id, version, ZlibDecoder::new(reader))
+        content::decode(id, version, ZlibDecoder::new(reader), budget)
     } else {
-        content::decode(id, version, reader)
+        content::decode(id, version, reader, budget)
     }
 }
 
@@ -115,9 +121,16 @@ mod tests {
         data.push(encoding as u8);
         data.extend(Encoding::UTF16.encode(text).into_iter());
 
-        let content = decode_content(&data[..], Version::Id3v22, id, false, false)
-            .unwrap()
-            .0;
+        let content = decode_content(
+            &data[..],
+            Version::Id3v22,
+            id,
+            false,
+            false,
+            &mut DecodeSizeBudget::plenty(),
+        )
+        .unwrap()
+        .0;
         let frame = Frame::with_content(id, content);
 
         let mut bytes = Vec::new();
@@ -140,9 +153,16 @@ mod tests {
         data.push(encoding as u8);
         data.extend(Encoding::UTF16.encode(text).into_iter());
 
-        let content = decode_content(&data[..], Version::Id3v23, id, false, false)
-            .unwrap()
-            .0;
+        let content = decode_content(
+            &data[..],
+            Version::Id3v23,
+            id,
+            false,
+            false,
+            &mut DecodeSizeBudget::plenty(),
+        )
+        .unwrap()
+        .0;
         let frame = Frame::with_content(id, content);
 
         let mut bytes = Vec::new();
@@ -166,9 +186,16 @@ mod tests {
         data.push(encoding as u8);
         data.extend(text.bytes());
 
-        let content = decode_content(&data[..], Version::Id3v24, id, false, false)
-            .unwrap()
-            .0;
+        let content = decode_content(
+            &data[..],
+            Version::Id3v24,
+            id,
+            false,
+            false,
+            &mut DecodeSizeBudget::plenty(),
+        )
+        .unwrap()
+        .0;
         let mut frame = Frame::with_content(id, content);
         frame.set_tag_alter_preservation(true);
         frame.set_file_alter_preservation(true);

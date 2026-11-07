@@ -6,6 +6,7 @@ use crate::frame::{
 };
 use crate::stream::encoding::Encoding;
 use crate::stream::frame;
+use crate::stream::tag::DecodeSizeBudget;
 use crate::tag::Version;
 use crate::{Error, ErrorKind};
 use std::convert::{TryFrom, TryInto};
@@ -383,32 +384,19 @@ pub fn encode(
     Ok(buf.len())
 }
 
-/// Upper bound on the amount of frame content read into memory.
-///
-/// This guards against decompression-bomb attacks: a frame using the
-/// COMPRESSION flag can declare a small on-disk size while inflating to
-/// gigabytes once passed through `ZlibDecoder`, since `ZlibDecoder` itself
-/// enforces no limit on its output.
-const MAX_FRAME_CONTENT_SIZE: u64 = 256 * 1024 * 1024; // 256 MiB
-
 pub fn decode(
     id: &str,
     version: Version,
     reader: impl io::Read,
+    budget: &mut DecodeSizeBudget,
 ) -> crate::Result<(Content, Option<Encoding>)> {
     let mut data = Vec::new();
-    reader
-        .take(MAX_FRAME_CONTENT_SIZE + 1)
-        .read_to_end(&mut data)?;
-    if data.len() as u64 > MAX_FRAME_CONTENT_SIZE {
-        return Err(Error::new(
-            ErrorKind::Parsing,
-            "frame content exceeds the maximum allowed decoded size",
-        ));
-    }
+    reader.take(budget.remaining() + 1).read_to_end(&mut data)?;
+    budget.consume(data.len() as u64)?;
     let decoder = Decoder {
         r: &mut data,
         version,
+        budget,
     };
 
     let mut encoding = None;
@@ -471,6 +459,7 @@ pub fn decode(
 struct Decoder<'a> {
     r: &'a [u8],
     version: Version,
+    budget: &'a mut DecodeSizeBudget,
 }
 
 impl<'a> Decoder<'a> {
@@ -852,7 +841,7 @@ impl<'a> Decoder<'a> {
         let start_offset = self.uint32()?;
         let end_offset = self.uint32()?;
         let mut frames = Vec::new();
-        while let Some((_advance, frame)) = frame::decode(&mut self.r, self.version)? {
+        while let Some((_advance, frame)) = frame::decode(&mut self.r, self.version, self.budget)? {
             frames.push(frame);
         }
         Ok(Content::Chapter(Chapter {
@@ -974,7 +963,7 @@ impl<'a> Decoder<'a> {
             elements.push(self.string_delimited(Encoding::Latin1)?);
         }
         let mut frames = Vec::new();
-        while let Some((_advance, frame)) = frame::decode(&mut self.r, self.version)? {
+        while let Some((_advance, frame)) = frame::decode(&mut self.r, self.version, self.budget)? {
             frames.push(frame);
         }
         Ok(Content::TableOfContents(TableOfContents {
@@ -1091,7 +1080,15 @@ mod tests {
             return;
         }
 
-        assert!(decode("PIC", Version::Id3v22, &[][..]).is_err());
+        assert!(
+            decode(
+                "PIC",
+                Version::Id3v22,
+                &[][..],
+                &mut DecodeSizeBudget::plenty()
+            )
+            .is_err()
+        );
 
         let mut format_map = HashMap::new();
         format_map.insert("image/jpeg", "JPG");
@@ -1119,11 +1116,16 @@ mod tests {
                     data.extend(picture_data.iter().cloned());
 
                     assert_eq!(
-                        *decode("PIC", Version::Id3v22, &data[..])
-                            .unwrap()
-                            .0
-                            .picture()
-                            .unwrap(),
+                        *decode(
+                            "PIC",
+                            Version::Id3v22,
+                            &data[..],
+                            &mut DecodeSizeBudget::plenty()
+                        )
+                        .unwrap()
+                        .0
+                        .picture()
+                        .unwrap(),
                         picture
                     );
                     let mut data_out = Vec::new();
@@ -1146,7 +1148,15 @@ mod tests {
             return;
         }
 
-        assert!(decode("APIC", Version::Id3v23, &[][..]).is_err());
+        assert!(
+            decode(
+                "APIC",
+                Version::Id3v23,
+                &[][..],
+                &mut DecodeSizeBudget::plenty()
+            )
+            .is_err()
+        );
 
         for mime_type in &["", "image/jpeg"] {
             for description in &["", "description"] {
@@ -1176,11 +1186,16 @@ mod tests {
                     data.extend(picture_data.iter().cloned());
 
                     assert_eq!(
-                        *decode("APIC", Version::Id3v23, &data[..])
-                            .unwrap()
-                            .0
-                            .picture()
-                            .unwrap(),
+                        *decode(
+                            "APIC",
+                            Version::Id3v23,
+                            &data[..],
+                            &mut DecodeSizeBudget::plenty()
+                        )
+                        .unwrap()
+                        .0
+                        .picture()
+                        .unwrap(),
                         picture
                     );
                     let mut data_out = Vec::new();
@@ -1199,7 +1214,15 @@ mod tests {
 
     #[test]
     fn test_comm() {
-        assert!(decode("COMM", Version::Id3v23, &[][..]).is_err());
+        assert!(
+            decode(
+                "COMM",
+                Version::Id3v23,
+                &[][..],
+                &mut DecodeSizeBudget::plenty()
+            )
+            .is_err()
+        );
 
         println!("valid");
         for description in &["", "description"] {
@@ -1224,11 +1247,16 @@ mod tests {
                         text: comment.to_string(),
                     };
                     assert_eq!(
-                        *decode("COMM", Version::Id3v23, &data[..])
-                            .unwrap()
-                            .0
-                            .comment()
-                            .unwrap(),
+                        *decode(
+                            "COMM",
+                            Version::Id3v23,
+                            &data[..],
+                            &mut DecodeSizeBudget::plenty()
+                        )
+                        .unwrap()
+                        .0
+                        .comment()
+                        .unwrap(),
                         content
                     );
                     let mut data_out = Vec::new();
@@ -1259,7 +1287,15 @@ mod tests {
             data.extend(b"eng".iter().cloned());
             data.extend(bytes_for_encoding(description, *encoding).into_iter());
             data.extend(bytes_for_encoding(comment, *encoding).into_iter());
-            assert!(decode("COMM", Version::Id3v23, &data[..]).is_err());
+            assert!(
+                decode(
+                    "COMM",
+                    Version::Id3v23,
+                    &data[..],
+                    &mut DecodeSizeBudget::plenty()
+                )
+                .is_err()
+            );
         }
         println!("Empty description");
         let comment = "comment";
@@ -1283,11 +1319,16 @@ mod tests {
             println!("data == {:?}", data);
             println!("content == {:?}", content);
             assert_eq!(
-                *decode("COMM", Version::Id3v23, &data[..])
-                    .unwrap()
-                    .0
-                    .comment()
-                    .unwrap(),
+                *decode(
+                    "COMM",
+                    Version::Id3v23,
+                    &data[..],
+                    &mut DecodeSizeBudget::plenty()
+                )
+                .unwrap()
+                .0
+                .comment()
+                .unwrap(),
                 content
             );
         }
@@ -1298,7 +1339,14 @@ mod tests {
         // Counter with 3 bytes
         let bin = b"\x00\xff\xaa\xaa\xaa";
         assert_eq!(
-            decode("POPM", Version::Id3v23, &bin[..]).unwrap().0,
+            decode(
+                "POPM",
+                Version::Id3v23,
+                &bin[..],
+                &mut DecodeSizeBudget::plenty()
+            )
+            .unwrap()
+            .0,
             Content::Popularimeter(Popularimeter {
                 user: "".to_string(),
                 rating: 255,
@@ -1309,7 +1357,14 @@ mod tests {
         // Counter with 12 bytes
         let bin = b"\x00\xff\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xbb\xbb\xbb\xbb";
         assert_eq!(
-            decode("POPM", Version::Id3v23, &bin[..]).unwrap().0,
+            decode(
+                "POPM",
+                Version::Id3v23,
+                &bin[..],
+                &mut DecodeSizeBudget::plenty()
+            )
+            .unwrap()
+            .0,
             Content::Popularimeter(Popularimeter {
                 user: "".to_string(),
                 rating: 255,
@@ -1320,7 +1375,15 @@ mod tests {
 
     #[test]
     fn test_text() {
-        assert!(decode("TALB", Version::Id3v23, &[][..]).is_err());
+        assert!(
+            decode(
+                "TALB",
+                Version::Id3v23,
+                &[][..],
+                &mut DecodeSizeBudget::plenty()
+            )
+            .is_err()
+        );
 
         for text in &["", "text"] {
             for encoding in &[
@@ -1335,11 +1398,16 @@ mod tests {
                 data.extend(bytes_for_encoding(text, *encoding).into_iter());
 
                 assert_eq!(
-                    decode("TALB", Version::Id3v23, &data[..])
-                        .unwrap()
-                        .0
-                        .text()
-                        .unwrap(),
+                    decode(
+                        "TALB",
+                        Version::Id3v23,
+                        &data[..],
+                        &mut DecodeSizeBudget::plenty()
+                    )
+                    .unwrap()
+                    .0
+                    .text()
+                    .unwrap(),
                     *text
                 );
                 let mut data_out = Vec::new();
@@ -1357,7 +1425,15 @@ mod tests {
 
     #[test]
     fn test_null_terminated_text_v4() {
-        assert!(decode("TRCK", Version::Id3v24, &[][..]).is_err());
+        assert!(
+            decode(
+                "TRCK",
+                Version::Id3v24,
+                &[][..],
+                &mut DecodeSizeBudget::plenty()
+            )
+            .is_err()
+        );
         let text = "text\u{0}text\u{0}";
         for encoding in &[
             Encoding::Latin1,
@@ -1371,11 +1447,16 @@ mod tests {
             data.extend(bytes_for_encoding(text, *encoding).into_iter());
 
             assert_eq!(
-                decode("TALB", Version::Id3v24, &data[..])
-                    .unwrap()
-                    .0
-                    .text()
-                    .unwrap(),
+                decode(
+                    "TALB",
+                    Version::Id3v24,
+                    &data[..],
+                    &mut DecodeSizeBudget::plenty()
+                )
+                .unwrap()
+                .0
+                .text()
+                .unwrap(),
                 "text\u{0}text"
             );
             let mut data_out = Vec::new();
@@ -1392,7 +1473,15 @@ mod tests {
 
     #[test]
     fn test_non_null_terminated_text_v4() {
-        assert!(decode("TRCK", Version::Id3v24, &[][..]).is_err());
+        assert!(
+            decode(
+                "TRCK",
+                Version::Id3v24,
+                &[][..],
+                &mut DecodeSizeBudget::plenty()
+            )
+            .is_err()
+        );
         let text = "text\u{0}text";
         for encoding in &[
             Encoding::Latin1,
@@ -1406,11 +1495,16 @@ mod tests {
             data.extend(bytes_for_encoding(text, *encoding).into_iter());
 
             assert_eq!(
-                decode("TALB", Version::Id3v24, &data[..])
-                    .unwrap()
-                    .0
-                    .text()
-                    .unwrap(),
+                decode(
+                    "TALB",
+                    Version::Id3v24,
+                    &data[..],
+                    &mut DecodeSizeBudget::plenty()
+                )
+                .unwrap()
+                .0
+                .text()
+                .unwrap(),
                 "text\u{0}text"
             );
             let mut data_out = Vec::new();
@@ -1427,7 +1521,15 @@ mod tests {
 
     #[test]
     fn test_txxx() {
-        assert!(decode("TXXX", Version::Id3v23, &[][..]).is_err());
+        assert!(
+            decode(
+                "TXXX",
+                Version::Id3v23,
+                &[][..],
+                &mut DecodeSizeBudget::plenty()
+            )
+            .is_err()
+        );
 
         println!("valid");
         for key in &["", "key"] {
@@ -1450,11 +1552,16 @@ mod tests {
                         value: value.to_string(),
                     };
                     assert_eq!(
-                        *decode("TXXX", Version::Id3v23, &data[..])
-                            .unwrap()
-                            .0
-                            .extended_text()
-                            .unwrap(),
+                        *decode(
+                            "TXXX",
+                            Version::Id3v23,
+                            &data[..],
+                            &mut DecodeSizeBudget::plenty()
+                        )
+                        .unwrap()
+                        .0
+                        .extended_text()
+                        .unwrap(),
                         content
                     );
                     let mut data_out = Vec::new();
@@ -1484,7 +1591,15 @@ mod tests {
             data.push(*encoding as u8);
             data.extend(bytes_for_encoding(key, *encoding).into_iter());
             data.extend(bytes_for_encoding(value, *encoding).into_iter());
-            assert!(decode("TXXX", Version::Id3v23, &data[..]).is_err());
+            assert!(
+                decode(
+                    "TXXX",
+                    Version::Id3v23,
+                    &data[..],
+                    &mut DecodeSizeBudget::plenty()
+                )
+                .is_err()
+            );
         }
     }
 
@@ -1495,11 +1610,16 @@ mod tests {
             let data = link.as_bytes().to_vec();
 
             assert_eq!(
-                decode("WOAF", Version::Id3v23, &data[..])
-                    .unwrap()
-                    .0
-                    .link()
-                    .unwrap(),
+                decode(
+                    "WOAF",
+                    Version::Id3v23,
+                    &data[..],
+                    &mut DecodeSizeBudget::plenty()
+                )
+                .unwrap()
+                .0
+                .link()
+                .unwrap(),
                 *link
             );
             let mut data_out = Vec::new();
@@ -1516,7 +1636,15 @@ mod tests {
 
     #[test]
     fn test_wxxx() {
-        assert!(decode("WXXX", Version::Id3v23, &[][..]).is_err());
+        assert!(
+            decode(
+                "WXXX",
+                Version::Id3v23,
+                &[][..],
+                &mut DecodeSizeBudget::plenty()
+            )
+            .is_err()
+        );
 
         println!("valid");
         for description in &["", "rust"] {
@@ -1539,11 +1667,16 @@ mod tests {
                         link: link.to_string(),
                     };
                     assert_eq!(
-                        *decode("WXXX", Version::Id3v23, &data[..])
-                            .unwrap()
-                            .0
-                            .extended_link()
-                            .unwrap(),
+                        *decode(
+                            "WXXX",
+                            Version::Id3v23,
+                            &data[..],
+                            &mut DecodeSizeBudget::plenty()
+                        )
+                        .unwrap()
+                        .0
+                        .extended_link()
+                        .unwrap(),
                         content
                     );
                     let mut data_out = Vec::new();
@@ -1573,13 +1706,29 @@ mod tests {
             data.push(*encoding as u8);
             data.extend(bytes_for_encoding(description, *encoding).into_iter());
             data.extend(bytes_for_encoding(link, Encoding::Latin1).into_iter());
-            assert!(decode("WXXX", Version::Id3v23, &data[..]).is_err());
+            assert!(
+                decode(
+                    "WXXX",
+                    Version::Id3v23,
+                    &data[..],
+                    &mut DecodeSizeBudget::plenty()
+                )
+                .is_err()
+            );
         }
     }
 
     #[test]
     fn test_uslt() {
-        assert!(decode("USLT", Version::Id3v23, &[][..]).is_err());
+        assert!(
+            decode(
+                "USLT",
+                Version::Id3v23,
+                &[][..],
+                &mut DecodeSizeBudget::plenty()
+            )
+            .is_err()
+        );
 
         println!("valid");
         for description in &["", "description"] {
@@ -1604,11 +1753,16 @@ mod tests {
                         text: text.to_string(),
                     };
                     assert_eq!(
-                        *decode("USLT", Version::Id3v23, &data[..])
-                            .unwrap()
-                            .0
-                            .lyrics()
-                            .unwrap(),
+                        *decode(
+                            "USLT",
+                            Version::Id3v23,
+                            &data[..],
+                            &mut DecodeSizeBudget::plenty()
+                        )
+                        .unwrap()
+                        .0
+                        .lyrics()
+                        .unwrap(),
                         content
                     );
                     let mut data_out = Vec::new();
@@ -1639,7 +1793,15 @@ mod tests {
             data.extend(b"eng".iter().cloned());
             data.extend(bytes_for_encoding(description, *encoding).into_iter());
             data.extend(bytes_for_encoding(lyrics, *encoding).into_iter());
-            assert!(decode("USLT", Version::Id3v23, &data[..]).is_err());
+            assert!(
+                decode(
+                    "USLT",
+                    Version::Id3v23,
+                    &data[..],
+                    &mut DecodeSizeBudget::plenty()
+                )
+                .is_err()
+            );
         }
     }
 
@@ -1659,7 +1821,7 @@ mod tests {
     }
 
     fn check_involved_people_list(frame_id: &str, version: Version) {
-        assert!(decode(frame_id, version, &[][..]).is_err());
+        assert!(decode(frame_id, version, &[][..], &mut DecodeSizeBudget::plenty()).is_err());
 
         println!("valid");
         for people_list in &[
@@ -1698,11 +1860,16 @@ mod tests {
                         .collect(),
                 };
                 assert_eq!(
-                    *decode(frame_id, version, &data[..])
-                        .unwrap()
-                        .0
-                        .involved_people_list()
-                        .unwrap(),
+                    *decode(
+                        frame_id,
+                        version,
+                        &data[..],
+                        &mut DecodeSizeBudget::plenty()
+                    )
+                    .unwrap()
+                    .0
+                    .involved_people_list()
+                    .unwrap(),
                     content
                 );
                 let mut data_out = Vec::new();
@@ -1749,11 +1916,16 @@ mod tests {
                 ],
             };
             assert_eq!(
-                *decode(frame_id, version, &data[..])
-                    .unwrap()
-                    .0
-                    .involved_people_list()
-                    .unwrap(),
+                *decode(
+                    frame_id,
+                    version,
+                    &data[..],
+                    &mut DecodeSizeBudget::plenty()
+                )
+                .unwrap()
+                .0
+                .involved_people_list()
+                .unwrap(),
                 content
             );
         }
@@ -1786,7 +1958,14 @@ mod tests {
         encode(&mut data_out, &mllt, Version::Id3v23, Encoding::UTF8).unwrap();
         let expect_data = b"\x00\x01\x00\x01\xa2\x00\x00\x0f\x04\x04\x12\x34\x56";
         assert_eq!(format!("{:x?}", data_out), format!("{:x?}", expect_data));
-        let mllt_decoded = decode("MLLT", Version::Id3v23, &*data_out).unwrap().0;
+        let mllt_decoded = decode(
+            "MLLT",
+            Version::Id3v23,
+            &*data_out,
+            &mut DecodeSizeBudget::plenty(),
+        )
+        .unwrap()
+        .0;
         assert_eq!(mllt, mllt_decoded);
     }
 
@@ -1817,7 +1996,14 @@ mod tests {
         encode(&mut data_out, &mllt, Version::Id3v23, Encoding::UTF8).unwrap();
         let expect_data = b"\x00\x01\x00\x01\xa2\x00\x00\x0f\x08\x08\x11\x22\x33\x44\x55\x66";
         assert_eq!(format!("{:x?}", data_out), format!("{:x?}", expect_data));
-        let mllt_decoded = decode("MLLT", Version::Id3v23, &*data_out).unwrap().0;
+        let mllt_decoded = decode(
+            "MLLT",
+            Version::Id3v23,
+            &*data_out,
+            &mut DecodeSizeBudget::plenty(),
+        )
+        .unwrap()
+        .0;
         assert_eq!(mllt, mllt_decoded);
     }
 
@@ -1849,7 +2035,14 @@ mod tests {
         let expect_data =
             b"\x00\x01\x00\x01\xa2\x00\x00\x0f\x0c\x0c\x11\x12\x22\x33\x34\x44\x55\x56\x66";
         assert_eq!(format!("{:x?}", data_out), format!("{:x?}", expect_data));
-        let mllt_decoded = decode("MLLT", Version::Id3v23, &*data_out).unwrap().0;
+        let mllt_decoded = decode(
+            "MLLT",
+            Version::Id3v23,
+            &*data_out,
+            &mut DecodeSizeBudget::plenty(),
+        )
+        .unwrap()
+        .0;
         assert_eq!(mllt, mllt_decoded);
     }
 
@@ -1956,7 +2149,12 @@ mod tests {
         let mut reader = Cursor::new(data);
 
         // Attempt to decode the frame
-        let result = decode("MLLT", Version::Id3v23, &mut reader);
+        let result = decode(
+            "MLLT",
+            Version::Id3v23,
+            &mut reader,
+            &mut DecodeSizeBudget::plenty(),
+        );
 
         // Ensure that the result is an error due to overflow
         assert!(result.is_err());
@@ -1986,7 +2184,12 @@ mod tests {
         let mut reader = Cursor::new(data);
 
         // Attempt to decode the frame
-        let result = decode("MLLT", Version::Id3v23, &mut reader);
+        let result = decode(
+            "MLLT",
+            Version::Id3v23,
+            &mut reader,
+            &mut DecodeSizeBudget::plenty(),
+        );
 
         // Ensure that the result is an error due to overflow
         assert!(result.is_err());
@@ -2025,7 +2228,12 @@ mod tests {
         let mut reader = Cursor::new(data);
 
         // Attempt to decode the frame
-        let result = decode("MLLT", Version::Id3v23, &mut reader);
+        let result = decode(
+            "MLLT",
+            Version::Id3v23,
+            &mut reader,
+            &mut DecodeSizeBudget::plenty(),
+        );
 
         // Ensure that the result is an error due to overflow
         assert!(result.is_err());
@@ -2041,8 +2249,9 @@ mod tests {
         use flate2::write::ZlibEncoder;
         use std::io::Write;
 
-        // Highly-compressible payload that inflates far past MAX_FRAME_CONTENT_SIZE.
-        let inflated = vec![0u8; (MAX_FRAME_CONTENT_SIZE + 1024) as usize];
+        // Highly-compressible payload that inflates far past the budget.
+        let limit = 1024 * 1024;
+        let inflated = vec![0u8; limit as usize + 1024];
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
         encoder.write_all(&inflated).unwrap();
         let compressed = encoder.finish().unwrap();
@@ -2051,13 +2260,57 @@ mod tests {
             "TALB",
             Version::Id3v24,
             flate2::read::ZlibDecoder::new(&compressed[..]),
+            &mut DecodeSizeBudget::with_limit(limit),
         );
 
         let e = result.unwrap_err();
         assert!(matches!(e.kind, ErrorKind::Parsing));
         assert_eq!(
             e.description,
-            "frame content exceeds the maximum allowed decoded size"
+            "tag content exceeds the maximum allowed decoded size"
         );
+    }
+
+    #[test]
+    fn test_decode_budget_is_shared_between_frames() {
+        let mut budget = DecodeSizeBudget::with_limit(10);
+        let mut data = vec![Encoding::Latin1 as u8];
+        data.extend(b"abcd");
+
+        // 5 bytes each: the first two frames fit exactly, the third exceeds the budget.
+        assert!(decode("TALB", Version::Id3v24, &data[..], &mut budget).is_ok());
+        assert!(decode("TIT2", Version::Id3v24, &data[..], &mut budget).is_ok());
+        assert_eq!(budget.remaining(), 0);
+        let e = decode("TPE1", Version::Id3v24, &data[..], &mut budget).unwrap_err();
+        assert!(matches!(e.kind, ErrorKind::Parsing));
+        assert_eq!(
+            e.description,
+            "tag content exceeds the maximum allowed decoded size"
+        );
+    }
+
+    #[test]
+    fn test_decode_budget_charges_chapter_subframes() {
+        let mut sub_frame = Vec::new();
+        crate::stream::frame::v4::encode(
+            &mut sub_frame,
+            &frame::Frame::text("TIT2", "abcd"),
+            crate::stream::frame::v4::Flags::empty(),
+        )
+        .unwrap();
+        let mut chap = b"c\0".to_vec();
+        chap.extend([0; 16]);
+        chap.extend(&sub_frame);
+
+        // The CHAP content itself fits the budget, but the copy made of its sub-frame does not.
+        let mut budget = DecodeSizeBudget::with_limit(chap.len() as u64 + 1);
+        let e = decode("CHAP", Version::Id3v24, &chap[..], &mut budget).unwrap_err();
+        assert_eq!(
+            e.description,
+            "tag content exceeds the maximum allowed decoded size"
+        );
+
+        let mut budget = DecodeSizeBudget::with_limit(2 * chap.len() as u64);
+        assert!(decode("CHAP", Version::Id3v24, &chap[..], &mut budget).is_ok());
     }
 }
