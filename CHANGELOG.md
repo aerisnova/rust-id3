@@ -1,3 +1,9 @@
+## v1.17.4 (2026-11-17)
+
+### Fix
+
+- Let test_serato_geob use a temp file for writing
+
 ## v1.17.3 (2026-11-07)
 
 ### Fix
