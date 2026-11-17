@@ -1053,12 +1053,13 @@ mod tests {
     /// Serato writes its GEOB tags twice with different encoding.
     #[test]
     fn test_serato_geob() {
-        let tag = Tag::read_from_path("testdata/geob_serato.id3").unwrap();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::copy("testdata/geob_serato.id3", &tmp).unwrap();
+        let tag = Tag::read_from_path(&tmp).unwrap();
         let count = tag.encapsulated_objects().count();
         assert_eq!(count, 14);
-        tag.write_to_path("testdata/geob_serato.id3", Version::Id3v24)
-            .unwrap();
-        let tag = Tag::read_from_path("testdata/geob_serato.id3").unwrap();
+        tag.write_to_path(&tmp, Version::Id3v24).unwrap();
+        let tag = Tag::read_from_path(&tmp).unwrap();
         assert_eq!(count, tag.encapsulated_objects().count());
     }
 
