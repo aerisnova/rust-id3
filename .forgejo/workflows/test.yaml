@@ -18,7 +18,7 @@ defaults:
 
 jobs:
   test:
-    runs-on: codeberg-small
+    runs-on: self-hosted
     container:
       image: codeberg.org/polyfloyd/nix-ci:latest
     steps:
@@ -38,7 +38,7 @@ jobs:
 
   conventional-commits:
     if: github.event_name == 'pull_request'
-    runs-on: codeberg-tiny
+    runs-on: self-hosted
     container:
       image: codeberg.org/polyfloyd/nix-ci:latest
     steps:

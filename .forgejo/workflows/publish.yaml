@@ -4,11 +4,19 @@ on:
   release:
     types: [published]
 
+defaults:
+  run:
+    shell: nix develop --command {0}
+
 jobs:
   cargo-publish:
-    runs-on: codeberg-tiny
+    runs-on: self-hosted
+    container:
+      image: codeberg.org/polyfloyd/nix-ci:latest
     steps:
       - uses: actions/checkout@v4
+      - name: Populate /nix/store
+        run: echo done
       - run: cargo publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

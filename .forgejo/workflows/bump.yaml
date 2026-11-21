@@ -9,7 +9,7 @@ defaults:
 
 jobs:
   bump:
-    runs-on: codeberg-small
+    runs-on: self-hosted
     container:
       image: codeberg.org/polyfloyd/nix-ci:latest
     steps:
