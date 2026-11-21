@@ -495,7 +495,7 @@ convert_2_to_3_and_back!(
     "POP", "POPM",
 
     "REV", "RVRB",
-    "RVA", "RVA2",
+    "RVA", "RVAD",
 
     "SLT", "SYLT",
     "STC", "SYTC",
