@@ -603,6 +603,22 @@ impl FromIterator<Frame> for Tag {
     }
 }
 
+impl Tag {
+    /// Adds a frame read from a file. A repeated text frame is merged into the first one
+    /// instead of replacing it, so a tag that breaks the uniqueness rule loses no value on
+    /// a read and a write.
+    pub(crate) fn add_parsed_frame(&mut self, frame: Frame) {
+        let version = self.version();
+        let merged = self
+            .frames
+            .iter_mut()
+            .any(|first| first.merge_repeat(&frame, version));
+        if !merged {
+            self.add_frame(frame);
+        }
+    }
+}
+
 impl Extend<Frame> for Tag {
     fn extend<I: IntoIterator<Item = Frame>>(&mut self, iter: I) {
         self.frames.extend(iter)
