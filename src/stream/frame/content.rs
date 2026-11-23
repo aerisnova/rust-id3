@@ -385,6 +385,15 @@ pub fn encode(
     Ok(buf.len())
 }
 
+/// The text frames that ID3v2.2 and ID3v2.3 allow to hold several values separated by "/".
+/// In every other text frame of those versions a "/" is part of the text.
+pub(crate) fn has_multiple_values_v23(id: &str) -> bool {
+    matches!(
+        id,
+        "TCOM" | "TCM" | "TEXT" | "TXT" | "TOLY" | "TOL" | "TOPE" | "TOA" | "TPE1" | "TP1"
+    )
+}
+
 pub fn decode(
     id: &str,
     version: Version,
@@ -443,9 +452,7 @@ pub fn decode(
         // contents are read verbatim. Note that when trying to write multiple values, the values
         // will be joined using "/" for  *all* tags, because the alternative would be to just throw
         // an error.
-        "TCOM" | "TCM" | "TEXT" | "TXT" | "TOLY" | "TOL" | "TOPE" | "TOA" | "TPE1" | "TP1" => {
-            decoder.text_content_multiple()
-        }
+        id if has_multiple_values_v23(id) => decoder.text_content_multiple(),
         id if id.starts_with('T') => decoder.text_content(),
         id if id.starts_with('W') => decoder.link_content(),
         "GRP1" => decoder.text_content(),

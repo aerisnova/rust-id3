@@ -2,7 +2,6 @@ use crate::chunk;
 use crate::storage::{Format, Storage, StorageFile, plain::PlainStorage};
 use crate::stream::{frame, unsynch};
 use crate::tag::{Tag, Version};
-use crate::taglike::TagLike;
 use crate::{Error, ErrorKind};
 use bitflags::bitflags;
 use byteorder::{BigEndian, ByteOrder, WriteBytesExt};
@@ -306,7 +305,7 @@ fn decode_remaining(mut reader: impl io::Read, header: Header) -> crate::Result<
                     Some(v) => v,
                     None => break, // Padding.
                 };
-                tag.add_frame(frame);
+                tag.add_parsed_frame(frame);
                 offset += bytes_read as u64;
             }
             Ok(tag)
@@ -324,7 +323,7 @@ fn decode_remaining(mut reader: impl io::Read, header: Header) -> crate::Result<
                     Some(v) => v,
                     None => break, // Padding.
                 };
-                tag.add_frame(frame);
+                tag.add_parsed_frame(frame);
                 offset += bytes_read as u64;
             }
             Ok(tag)
@@ -346,7 +345,7 @@ pub fn decode_v2_frames(
         };
         match v {
             Some((_bytes_read, frame)) => {
-                tag.add_frame(frame);
+                tag.add_parsed_frame(frame);
             }
             None => break Ok(tag),
         }
@@ -558,11 +557,12 @@ pub fn locate_id3v2(reader: impl io::Read + io::Seek) -> crate::Result<Range<u64
 mod tests {
     use super::*;
     use crate::frame::{
-        Chapter, Content, EncapsulatedObject, Frame, MpegLocationLookupTable,
+        Chapter, Content, EncapsulatedObject, ExtendedText, Frame, MpegLocationLookupTable,
         MpegLocationLookupTableReference, Picture, PictureType, Popularimeter, Private,
         SynchronisedLyrics, SynchronisedLyricsType, TableOfContents, TimestampFormat,
         UniqueFileIdentifier, Unknown,
     };
+    use crate::taglike::TagLike;
     use std::fs::{self};
     use std::io::{self, Read};
 
@@ -1204,5 +1204,63 @@ mod tests {
             assert!(matches!(e.kind, ErrorKind::Parsing));
             assert_eq!(e.description, "CHAP/CTOC frames are nested too deeply");
         }
+    }
+
+    /// ffmpeg writes its MP4 brand fields as three TXXX frames with one empty description.
+    fn repeated_frames() -> Tag {
+        let txxx = |value: &str| {
+            Frame::with_content(
+                "TXXX",
+                Content::ExtendedText(ExtendedText {
+                    description: String::new(),
+                    value: value.to_string(),
+                }),
+            )
+        };
+        Tag::from_iter([
+            txxx("major_brand"),
+            txxx("minor_version"),
+            txxx("major_brand"),
+            txxx("compatible_brands"),
+            Frame::text("TIT2", "Title"),
+            Frame::text("TIT2", "Title"),
+            Frame::text("TIT2", "Other Title"),
+        ])
+    }
+
+    fn reencode(tag: &Tag, version: Version) -> Tag {
+        let mut buffer = Vec::new();
+        Encoder::new()
+            .version(version)
+            .encode(tag, &mut buffer)
+            .unwrap();
+        decode(&mut io::Cursor::new(buffer)).unwrap()
+    }
+
+    #[test]
+    fn repeated_text_frames_merge_with_nul_on_id3v24() {
+        let tag = reencode(&repeated_frames(), Version::Id3v24);
+        let texts: Vec<_> = tag.extended_texts().collect();
+        assert_eq!(texts.len(), 1);
+        assert_eq!(
+            texts[0].value,
+            "major_brand\0minor_version\0compatible_brands"
+        );
+        assert_eq!(tag.frames().filter(|f| f.id() == "TIT2").count(), 1);
+        assert_eq!(tag.title(), Some("Title\0Other Title"));
+        assert_eq!(reencode(&tag, Version::Id3v24), tag);
+    }
+
+    #[test]
+    fn repeated_text_frames_merge_with_slash_on_id3v23() {
+        let tag = reencode(&repeated_frames(), Version::Id3v23);
+        let texts: Vec<_> = tag.extended_texts().collect();
+        assert_eq!(texts.len(), 1);
+        assert_eq!(
+            texts[0].value,
+            "major_brand/minor_version/compatible_brands"
+        );
+        assert_eq!(tag.title(), Some("Title/Other Title"));
+        assert_eq!(reencode(&tag, Version::Id3v23), tag);
     }
 }

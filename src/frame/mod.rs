@@ -1,5 +1,6 @@
 use crate::error::{Error, ErrorKind};
 use crate::stream::encoding::Encoding;
+use crate::stream::frame::content::has_multiple_values_v23;
 use crate::tag::Version;
 use std::fmt;
 use std::str;
@@ -39,6 +40,13 @@ pub struct Frame {
     encoding: Option<Encoding>,
 }
 
+fn push_value(values: &mut String, value: &str, separator: char) {
+    if !values.split(separator).any(|present| present == value) {
+        values.push(separator);
+        values.push_str(value);
+    }
+}
+
 impl Frame {
     /// Check if this Frame is identical to another frame
     pub(crate) fn compare(&self, other: &Frame) -> bool {
@@ -59,6 +67,35 @@ impl Frame {
                     || self.encoding == other.encoding)
         } else {
             false
+        }
+    }
+
+    /// Adds the values of `other`, a repeat of this text frame, so that a tag carrying one
+    /// frame twice keeps both values instead of only the last. A value already present is
+    /// not added again.
+    ///
+    /// The values are joined the way a read of the written frame splits them again. ID3v2.4
+    /// separates values with a NUL. ID3v2.2 and ID3v2.3 separate them with "/" in a few
+    /// frames only, which are read with the NUL in its place, and the encoder writes the
+    /// NUL back as "/". In their other frames, TXXX included, a "/" is text, so the values
+    /// are joined with a "/" that is read back as text. Returns false, and changes nothing,
+    /// when `other` is not a repeat of this text frame.
+    pub(crate) fn merge_repeat(&mut self, other: &Frame, version: Version) -> bool {
+        if !self.compare(other) {
+            return false;
+        }
+        let v24 = version == Version::Id3v24;
+        let split = v24 || has_multiple_values_v23(self.id());
+        match (&mut self.content, &other.content) {
+            (Content::Text(text), Content::Text(more)) => {
+                push_value(text, more, if split { '\0' } else { '/' });
+                true
+            }
+            (Content::ExtendedText(text), Content::ExtendedText(more)) => {
+                push_value(&mut text.value, &more.value, if v24 { '\0' } else { '/' });
+                true
+            }
+            _ => false,
         }
     }
 
